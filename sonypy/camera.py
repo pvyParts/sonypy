@@ -2,7 +2,6 @@ import requests
 import json
 import struct
 
-
 class CameraError(Exception):
 
     def __init__(self, code, s):
@@ -30,30 +29,35 @@ class RawCamera(object):
                     version=self.version)
         data = json.dumps(body)
         r = requests.post(self.endpoint, data=data)
-        resp = r.json
+        resp = r.json()
+        #print resp
         assert resp['id'] == 1
-        error = resp.get('error')
-        if error:
-            self._handle_error(error)
-        else:
+        if 'error' in resp:
+            self._handle_error(resp['error'])
+        elif 'results' in resp:
             return resp['results']
+        else:
+            return resp['result']
 
-    def _handle_error(self, error):
+    @staticmethod
+    def _handle_error(error):
         raise CameraError(*error)
 
     def set_shoot_mode(self, mode):
         """
-        Set the shooting mode. Can be one of 'still', 'movie', or 'audio'.
+        Set the shooting mode. Can be one of 'still', 'movie', 'audio'
+        or 'intervalstill'.
         """
-        valid_modes = ('still', 'movie', 'audio')
+        valid_modes = ('still', 'movie', 'audio', 'intervalstill')
         if mode not in valid_modes:
-            raise ValueError('mode must be one of %r' % valid_modes)
+            raise ValueError('mode must be one of {0!r}'.format(valid_modes))
         result = self._do_request('setShootMode', mode)
         assert result == [0], "unexpected result"
 
     def get_shoot_mode(self):
         """
-        Get the shooting mode. Will be one of 'still', 'movie', or 'audio'.
+        Get the shooting mode. Will be one of 'still', 'movie', 'audio'
+        or 'intervalstill'.
         """
         result = self._do_request('getShootMode')
         mode = result[0]
@@ -63,7 +67,7 @@ class RawCamera(object):
         """
         Get a list of supported shooting modes.
         """
-        result = self._do_request('getSuppoedShootMode')
+        result = self._do_request('getSupportedShootMode')
         return result[0]
 
     def get_available_shoot_mode(self):
@@ -127,7 +131,7 @@ class RawCamera(object):
         """
         Stop liveview stream.
         """
-        result = self._do_request('stopLiveView')
+        result = self._do_request('stopLiveview')
         assert result == [0]
 
     def act_zoom(self, direction, movement):
@@ -254,36 +258,30 @@ class RawCamera(object):
         """
         return self._do_request('getVersions')
 
-    def get_method_types(self):
+    def get_method_types(self, version=""):
         """
         Get supported APIs for this version. This differs from
         .get_available_api_list() in that it includes parameter and version
         information with each method name.
         """
-        return self._do_request('getMethodTypes')
+        return self._do_request('getMethodTypes', version)
 
-    def _decode_common_header(self, buf):
-        start, ptype, seq, timestamp = struct.unpack('BBHI', buf)
-        return seq, timestamp
-
-    def _decode_payload_header(self, buf):
-        format = 'IBBBBIB'
-        buf = buf[:struct.calcsize(format)]
-        d = struct.unpack(format, buf)
-        start = d[0]
-        assert start == '\x24\x35\x68\x79', "payload start mismatch"
-        jpeg_size = struct.pack('I', [0] + d[1])
-        padding_size = d[2]
+    @staticmethod
+    def _decode_payload_header(buf):
+        start = struct.unpack('>4s', buf[:4])[0]
+        assert start == '\x24\x35\x68\x79', 'payload start mismatch'
+        jpeg_size = struct.unpack('>I', '\x00' + buf[4:7])[0]
+        padding_size = struct.unpack('>B', buf[7:8])[0]
         return jpeg_size, padding_size
 
     def stream_liveview(self, url):
         """
         Connect to a liveview-format URL and yield a series of JPEG frames.
         """
-        r = requests.get(url)
+        r = requests.get(url, stream=True)
         while True:
-            # Read common header, 8 bytes.
-            seq, timestamp = self._decode_common_header(r.raw.read(8))
+            # Throw away the common header, 8 bytes.
+            r.raw.read(8)
             # Read payload header, 128 bytes.
             jpeg_size, padding_size = \
                 self._decode_payload_header(r.raw.read(128))
@@ -299,14 +297,23 @@ class Camera(RawCamera):
     def get_event_mapped(self, long_poll):
         """
         Wraps the getEvent call to parse the result and make it possible to
-        look up values diretly. Specifically:
+        look up values directly. Specifically:
 
         The raw result value is a list of dict, where each dict includes a
         'type' key. Rearrange the list into a dict, where each top-level key
         remaps to a dict based on it's type value.
         """
         result = self.get_event(long_poll)
-        return {obj['type']: obj for obj in result}
+        objects = {}
+        for obj in result:
+            # skip list elements which are 'None' or empty lists
+            if obj:
+                # some list elements are lists with exactly one dict element
+                if isinstance(obj, list):
+                    assert len(obj) == 1
+                    obj = obj[0]
+                objects[obj['type']] = obj
+        return objects
 
     def tether(self):
         """
@@ -315,5 +322,5 @@ class Camera(RawCamera):
         """
         while True:
             liveview_url = self.await_take_picture()
-            r = requests.get(liveview_url)
-            yield r.body
+            r = requests.get(liveview_url[0])
+            yield r.content
