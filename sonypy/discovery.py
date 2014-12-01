@@ -1,7 +1,6 @@
 import socket
-import re
 import requests
-
+from xml.etree import ElementTree as etree
 
 from .camera import Camera
 
@@ -19,18 +18,6 @@ discovery_msg = ('M-SEARCH * HTTP/1.1\r\n'
                  '\r\n')
 
 
-dd_regex = ('<av:X_ScalarWebAPI_Service>'
-            '\s*'
-            '<av:X_ScalarWebAPI_ServiceType>'
-            '(.+)'
-            '</av:X_ScalarWebAPI_ServiceType>'
-            '<av:X_ScalarWebAPI_ActionList_URL>'
-            '(.+)'
-            '</av:X_ScalarWebAPI_ActionList_URL>'
-            '\s*'
-            '</av:X_ScalarWebAPI_Service>')
-
-
 class Discoverer(object):
     camera_class = Camera
 
@@ -41,12 +28,13 @@ class Discoverer(object):
                 yield addr
 
     def _parse_ssdp_response(self, data):
-        lines = data.split('\n')
-        assert lines[0] == 'HTTP/1.1 200 OK'
+        lines = [l.rstrip('\r') for l in data.split('\n')]
+        assert lines[0].startswith('HTTP/1.1 200 OK')
         headers = {}
         for line in lines[1:]:
-            key, val = line.split(': ', 1)
-            headers[key.lower()] = val
+            if line:
+                key, val = line.split(': ', 1)
+                headers[key.lower()] = val
         return headers
 
     def _ssdp_discover(self, timeout=1):
@@ -80,10 +68,13 @@ class Discoverer(object):
         Parse the XML device definition file.
         """
         services = {}
-        for m in re.findall(dd_regex, doc):
-            service_name = m.group(1)
-            endpoint = m.group(2)
+        root = etree.fromstring(doc)
+        for srv in root.findall('{urn:schemas-upnp-org:device-1-0}device/{urn:schemas-sony-com:av}X_ScalarWebAPI_DeviceInfo/{urn:schemas-sony-com:av}X_ScalarWebAPI_ServiceList/{urn:schemas-sony-com:av}X_ScalarWebAPI_Service'):
+            service_cfg = {child.tag.rsplit('}', 1)[-1]:child.text for child in srv.getchildren()}
+            service_name = service_cfg['X_ScalarWebAPI_ServiceType']
+            endpoint = service_cfg['X_ScalarWebAPI_ActionList_URL'] + '/' + service_name
             services[service_name] = endpoint
+            #print endpoint
         return services
 
     def _read_device_definition(self, url):
